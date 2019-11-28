@@ -39,14 +39,6 @@ if(NOT TARGET spdlog::spdlog)
 	target_compile_definitions(spdlog INTERFACE SPDLOG_FMT_EXTERNAL)
 endif()
 
-# Libigl
-if(NOT TARGET igl::core)
-	float_tetwild_download_libigl()
-
-	# Import libigl targets
-	list(APPEND CMAKE_MODULE_PATH "${FLOAT_TETWILD_EXTERNAL}/libigl/cmake")
-	include(libigl)
-endif()
 
 # Geogram
 if(NOT TARGET geogram::geogram)

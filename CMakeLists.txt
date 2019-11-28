@@ -60,18 +60,6 @@ option(SANITIZE_MEMORY    "Sanitize Memory"        OFF)
 option(SANITIZE_THREAD    "Sanitize Thread"        OFF)
 option(SANITIZE_UNDEFINED "Sanitize Undefined"     OFF)
 
-# Options for libigl modules
-option(LIBIGL_USE_STATIC_LIBRARY          "Use libigl as static library" OFF)
-option(LIBIGL_WITH_COMISO            "Use CoMiso"                   OFF)
-option(LIBIGL_WITH_EMBREE            "Use Embree"                   OFF)
-option(LIBIGL_WITH_OPENGL            "Use OpenGL"                   OFF)
-option(LIBIGL_WITH_OPENGL_GLFW       "Use GLFW"                     OFF)
-option(LIBIGL_WITH_OPENGL_GLFW_IMGUI "Use ImGui"                    OFF)
-option(LIBIGL_WITH_PNG               "Use PNG"                      OFF)
-option(LIBIGL_WITH_TETGEN            "Use Tetgen"                   OFF)
-option(LIBIGL_WITH_TRIANGLE          "Use Triangle"                 OFF)
-option(LIBIGL_WITH_PREDICATES        "Use exact predicates"         OFF)
-option(LIBIGL_WITH_XML               "Use XML"                      OFF)
 
 # Sanitizers
 if(FLOAT_TETWILD_WITH_SANITIZERS)
