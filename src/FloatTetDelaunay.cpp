@@ -14,6 +14,44 @@
 #include <floattetwild/MeshImprovement.h>
 #include <floattetwild/MeshIO.hpp>
 
+
+
+#ifdef FLOAT_TETWILD_USE_TBB
+#include <tbb/task_scheduler_init.h>
+#include <thread>
+#endif
+
+#include <floattetwild/Mesh.hpp>
+#include <floattetwild/MeshIO.hpp>
+#include <floattetwild/FloatTetDelaunay.h>
+#include <floattetwild/FloatTetCutting.h>
+#include <floattetwild/LocalOperations.h>
+#include <floattetwild/MeshImprovement.h>
+#include <floattetwild/Simplification.h>
+#include <floattetwild/AABBWrapper.h>
+#include <floattetwild/Statistics.h>
+#include <floattetwild/TriangleInsertion.h>
+
+#include <floattetwild/Logger.hpp>
+#include <Eigen/Dense>
+
+#include <igl/Timer.h>
+
+#ifdef LIBIGL_WITH_TETGEN
+#include <igl/copyleft/tetgen/tetrahedralize.h>
+#endif
+
+#include <geogram/basic/logger.h>
+#include <geogram/basic/command_line.h>
+#include <geogram/basic/command_line_args.h>
+
+#include <geogram/mesh/mesh.h>
+
+#include<bitset>
+
+using namespace Eigen;
+
+
 namespace floatTetWild {
 	namespace {
         void
@@ -245,90 +283,249 @@ namespace floatTetWild {
                 exit(0);
             }
         }
+        match_bbox_fs(mesh, min, max);
+    }
+
+    void FloatTetDelaunay::fTetWildTetrahedralize(floatTetWild::Parameters& params, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, Eigen::Matrix<Scalar, Eigen::Dynamic, 3>& surface_verts, Eigen::Matrix<int, Eigen::Dynamic, 3>& surface_faces) {
+        GEO::initialize();
+    //    exactinit();
+
+        std::vector<int> indices(20);
+        std::iota(std::begin(indices), std::end(indices), 0);
+        floatTetWild::Random::shuffle(indices);
+        for (int a : indices)
+            std::cout << a << " ";
+        std::cout << std::endl;
+
+        // Import standard command line arguments, and custom ones
+        GEO::CmdLine::import_arg_group("standard");
+        GEO::CmdLine::import_arg_group("pre");
+        GEO::CmdLine::import_arg_group("algo");
+
+        bool run_tet_gen = false;
+        bool skip_simplify = false;
+
+        Mesh mesh;
+        mesh.params = params;
+    int boolean_op = -1;
+    unsigned int max_threads = std::numeric_limits<unsigned int>::max();
+    #ifdef FLOAT_TETWILD_USE_TBB
+        std::cout << "USING TBB\n";
+        const size_t MB = 1024 * 1024;
+        const size_t stack_size = 64 * MB;
+        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        num_threads = std::min(max_threads, num_threads);
+        params.num_threads = num_threads;
+        std::cout << "TBB threads " << num_threads << std::endl;
+        tbb::task_scheduler_init scheduler(num_threads, stack_size);
+    #else
+        std::cout << "NOT USING TBB\n";
+    #endif
+
+    //    if(params.is_quiet){
+    //        std::streambuf *orig_buf = cout.rdbuf();
+    //        cout.rdbuf(NULL);
+    //    }
+
+        Logger::init(!params.is_quiet, params.log_path);
+        params.log_level = std::max(0, std::min(6, params.log_level));
+        spdlog::set_level(static_cast<spdlog::level::level_enum>(params.log_level));
+        spdlog::flush_every(std::chrono::seconds(3));
+
+        GEO::Logger *geo_logger = GEO::Logger::instance();
+        geo_logger->unregister_all_clients();
+        // geo_logger->register_client(new GeoLoggerForward(logger().clone("geogram")));
+        geo_logger->set_pretty(false);
+
+
+        if (params.output_path.empty())
+            params.output_path = params.input_path;
+        if (params.log_path.empty())
+            params.log_path = params.output_path;
+
+
+        std::string output_mesh_name = params.output_path;
+        if (params.output_path.size() > 3
+            && params.output_path.substr(params.output_path.size() - 3, params.output_path.size()) == "msh")
+            output_mesh_name = params.output_path;
+        else if (params.output_path.size() > 4
+                && params.output_path.substr(params.output_path.size() - 4, params.output_path.size()) == "mesh")
+            output_mesh_name = params.output_path;
+        else
+            output_mesh_name = params.output_path + "_" + params.postfix + ".msh";
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        std::vector<Vector3> input_vertices;
+        std::vector<Vector3i> input_faces;
+        std::vector<int> input_tags;
+
+        if (!params.tag_path.empty()) {
+            input_tags.reserve(input_faces.size());
+            std::string line;
+            std::ifstream fin(params.tag_path);
+            if (fin.is_open()) {
+                while (getline(fin, line)) {
+                    input_tags.push_back(std::stoi(line));
+                }
+                fin.close();
+            }
+        }
+
+
+        igl::Timer timer;
+
+        GEO::Mesh sf_mesh;
+        if (!MeshIO::load_mesh(V, F, input_vertices, input_faces, sf_mesh, input_tags)) {
+            logger().error("Unable to load mesh at {}", params.input_path);
+        } else if (input_vertices.empty() || input_faces.empty()) {
+        }
+
+        if (input_tags.size() != input_faces.size()) {
+            input_tags.resize(input_faces.size());
+            std::fill(input_tags.begin(), input_tags.end(), 0);
+        }
+        AABBWrapper tree(sf_mesh);
+
+        // if (!params.init(tree.get_sf_diag())) {
+        // }
+
+    #ifdef LIBIGL_WITH_TETGEN
+        if(run_tet_gen)
+        {
+            Eigen::MatrixXd tetgen_pts(input_vertices.size(), 3);
+            Eigen::MatrixXi tetgen_faces(input_faces.size(), 3);
+
+            for(size_t i = 0; i < input_vertices.size(); ++i)
+            {
+                tetgen_pts.row(i) = input_vertices[i].cast<double>();
+            }
+
+            for(size_t i = 0; i < input_faces.size(); ++i)
+            {
+                tetgen_faces.row(i) = input_faces[i];
+            }
+
+            std::stringstream buf;
+            buf.precision(100);
+            buf.setf(std::ios::fixed, std::ios::floatfield);
+            buf<<"Qpq2.0a"<<params.ideal_edge_length*params.ideal_edge_length*params.ideal_edge_length*sqrt(2.)/12.;
+
+            Eigen::MatrixXi tetgen_generated_tets;
+            Eigen::MatrixXd tetgen_generated_points;
+            Eigen::MatrixXi tetgen_generated_faces;
+
+            timer.start();
+            igl::copyleft::tetgen::tetrahedralize(tetgen_pts, tetgen_faces, buf.str(), tetgen_generated_points, tetgen_generated_tets, tetgen_generated_faces);
+            timer.stop();
+            logger().info("Tetgen time {}s", timer.getElapsedTimeInSec());
+            stats().record(StateInfo::tetgen_id, timer.getElapsedTimeInSec(), tetgen_generated_points.rows(), tetgen_generated_tets.rows(), 0, 0);
+        }
+    #endif
+
+        stats().record(StateInfo::init_id, 0, input_vertices.size(), input_faces.size(), -1, -1);
+
+        timer.start();
+        simplify(input_vertices, input_faces, input_tags, tree, params, skip_simplify);
+        tree.init_b_mesh_and_tree(input_vertices, input_faces);
+        logger().info("preprocessing {}s", timer.getElapsedTimeInSec());
+        logger().info("");
+        stats().record(StateInfo::preprocessing_id, timer.getElapsedTimeInSec(), input_vertices.size(),
+                    input_faces.size(), -1, -1);
+        if (params.log_level <= 1)
+            output_component(input_vertices, input_faces, input_tags);
+
+        timer.start();
+        std::vector<bool> is_face_inserted(input_faces.size(), false);
+        FloatTetDelaunay::tetrahedralize(input_vertices, input_faces, tree, mesh, is_face_inserted);
+        logger().info("#v = {}", mesh.get_v_num());
+        logger().info("#t = {}", mesh.get_t_num());
+        logger().info("tetrahedralizing {}s", timer.getElapsedTimeInSec());
+        logger().info("");
+        stats().record(StateInfo::tetrahedralization_id, timer.getElapsedTimeInSec(), mesh.get_v_num(), mesh.get_t_num(),
+                    -1, -1);
+
+        timer.start();
+        insert_triangles(input_vertices, input_faces, input_tags, mesh, is_face_inserted, tree, false);
+        logger().info("cutting {}s", timer.getElapsedTimeInSec());
+        logger().info("");
+        stats().record(StateInfo::cutting_id, timer.getElapsedTimeInSec(), mesh.get_v_num(), mesh.get_t_num(),
+                    mesh.get_max_energy(), mesh.get_avg_energy(),
+                    std::count(is_face_inserted.begin(), is_face_inserted.end(), false));
+
+    //    timer.start();
+    ////    cutting(input_vertices, input_faces, mesh, is_face_inserted, tree);
+    //    cutting(input_vertices, input_faces, input_tags, mesh, is_face_inserted, tree);
+    //    logger().info("cutting {}s", timer.getElapsedTimeInSec());
+    //    logger().info("");
+    //    stats().record(StateInfo::cutting_id, timer.getElapsedTimeInSec(), mesh.get_v_num(), mesh.get_t_num(),
+    //                                                   mesh.get_max_energy(), mesh.get_avg_energy(),
+    //                                                   std::count(is_face_inserted.begin(), is_face_inserted.end(), false));
+
+        timer.start();
+        optimization(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, {{1, 1, 1, 1}});
+        logger().info("mesh optimization {}s", timer.getElapsedTimeInSec());
+        logger().info("");
+        stats().record(StateInfo::optimization_id, timer.getElapsedTimeInSec(), mesh.get_v_num(), mesh.get_t_num(),
+                    mesh.get_max_energy(), mesh.get_avg_energy());
+
+        timer.start();
+        correct_tracked_surface_orientation(mesh, tree);
+        logger().info("correct_tracked_surface_orientation done");
+        if (boolean_op < 0) {
+            if (params.smooth_open_boundary) {
+                smooth_open_boundary(mesh, tree);
+                for (auto &t: mesh.tets) {
+                    if (t.is_outside)
+                        t.is_removed = true;
+                }
+            } else
+                filter_outside(mesh);
+        } else
+            boolean_operation(mesh, boolean_op);
+        if(params.manifold_surface){
+    //        MeshIO::write_mesh(params.output_path + "_" + params.postfix + "_non_manifold.msh", mesh, false);
+            manifold_surface(mesh);
+        }
+        stats().record(StateInfo::wn_id, timer.getElapsedTimeInSec(), mesh.get_v_num(), mesh.get_t_num(),
+                    mesh.get_max_energy(), mesh.get_avg_energy());
+        logger().info("after winding number");
+        logger().info("#v = {}", mesh.get_v_num());
+        logger().info("#t = {}", mesh.get_t_num());
+        logger().info("winding number {}s", timer.getElapsedTimeInSec());
+        logger().info("");
+
+
+    //    if (params.output_path.size() > 3
+    //        && params.output_path.substr(params.output_path.size() - 3, params.output_path.size()) == "msh")
+    //        MeshIO::write_mesh(params.output_path, mesh, false);
+    //    else if (params.output_path.size() > 4
+    //             && params.output_path.substr(params.output_path.size() - 4, params.output_path.size()) == "mesh")
+    //        MeshIO::write_mesh(params.output_path, mesh, false);
+    //    else
+    //        MeshIO::write_mesh(params.output_path + "_" + params.postfix + ".msh", mesh, false);
 
         //fortest
-//        Eigen::MatrixXd VV(mesh.tet_vertices.size(), 3), VVo;
-//        Eigen::VectorXi _1, _2;
-//        for(int i=0;i<mesh.tet_vertices.size();i++){
-//            VV.row(i) = mesh.tet_vertices[i].pos;
-//        }
-//        igl::unique_rows(VV, VVo, _1, _2);
-//        cout<<VV.rows()<<" "<<VVo.rows()<<endl;
-//        cout<<T->nb_vertices()<<endl;
-//        cout<<mesh.tet_vertices.size()<<endl;
-//
-//        cout<<"T->nb_finite_cells() = "<<T->nb_finite_cells()<<endl;
-//        cout<<"T->nb_cells() = "<<T->nb_cells()<<endl;
-//        for (int i=0;i< mesh.tets.size();i++) {
-//            auto &t = mesh.tets[i];
-//            if (-GEO::PCK::orient_3d(mesh.tet_vertices[t[0]].pos.data(), mesh.tet_vertices[t[1]].pos.data(),
-//                                     mesh.tet_vertices[t[2]].pos.data(), mesh.tet_vertices[t[3]].pos.data()) <= 0) {
-//                cout << "inverted found!!!! 1" << endl;
-//                cout<<i<<endl;
-//            }
-//        }
-//        for (int i=0;i< mesh.tets.size();i++) {
-//            auto &t = mesh.tets[i];
-//            if (orient3d(mesh.tet_vertices[t[0]].pos.data(), mesh.tet_vertices[t[1]].pos.data(),
-//                         mesh.tet_vertices[t[2]].pos.data(), mesh.tet_vertices[t[3]].pos.data()) <= 0) {
-//                cout << "inverted found!!!! 2" << endl;
-//                cout<<i<<endl;
-//            }
-//        }
-//        for (int i=0;i< mesh.tets.size();i++) {
-//            auto &t = mesh.tets[i];
-//            if (is_inverted(mesh.tet_vertices[t[0]].pos, mesh.tet_vertices[t[1]].pos,
-//                         mesh.tet_vertices[t[2]].pos, mesh.tet_vertices[t[3]].pos)) {
-//                cout << "inverted found!!!! 3" << endl;
-//                cout<<i<<endl;
-//                t.print();
-//
-//                cout<<std::setprecision(17)<<tet_vertices[t[0]].pos.transpose()<<endl;
-//                cout<<tet_vertices[t[1]].pos.transpose()<<endl;
-//                cout<<tet_vertices[t[2]].pos.transpose()<<endl;
-//                cout<<tet_vertices[t[3]].pos.transpose()<<endl;
-//
-//                cout<<(tet_vertices[t[0]].pos[0] == tet_vertices[t[1]].pos[0])<<endl;
-//                cout<<(tet_vertices[t[1]].pos[0] == tet_vertices[t[2]].pos[0])<<endl;
-//                cout<<(tet_vertices[t[2]].pos[0] == tet_vertices[t[3]].pos[0])<<endl;
-//
-//                cout<<(tet_vertices[t[0]].pos[1] == tet_vertices[t[3]].pos[1])<<endl;
-//                cout<<(tet_vertices[t[1]].pos[1] == tet_vertices[t[2]].pos[1])<<endl;
-//
-//                cout<<(tet_vertices[t[0]].pos[2] == tet_vertices[t[2]].pos[2])<<endl;
-//                cout<<(tet_vertices[t[1]].pos[2] == tet_vertices[t[3]].pos[2])<<endl;
-//            }
-//        }
-//        pausee();
-//        //fortest
+        std::vector<Scalar> colors(mesh.tets.size(), -1);
+        for (int i = 0; i < mesh.tets.size(); i++) {
+            if (mesh.tets[i].is_removed)
+                continue;
+            colors[i] = mesh.tets[i].quality;
+        }
+        //fortest
+        // MeshIO::write_mesh(output_mesh_name, mesh, false, colors);
+        // MeshIO::write_surface_mesh(params.output_path + "_" + params.postfix + "_sf.obj", mesh, false);
 
-//        //set opp_t_ids
-//        for(int t_id = 0;t_id<mesh.tets.size();t_id++) {
-//            auto &t = mesh.tets[t_id];
-//            for (int j = 0; j < 4; j++) {
-//                if (t.opp_t_ids[j] >= 0)
-//                    continue;
-//                std::vector<int> pair;
-//                set_intersection(tet_vertices[t[(j + 1) % 4]].conn_tets,
-//                                 tet_vertices[t[(j + 2) % 4]].conn_tets,
-//                                 tet_vertices[t[(j + 3) % 4]].conn_tets, pair);
-//                if (pair.size() == 2) {
-//                    int opp_t_id = pair[0] == t_id ? pair[1] : pair[0];
-//                    t.opp_t_ids[j] = opp_t_id;
-//                    auto &opp_t = mesh.tets[opp_t_id];
-//                    for (int k = 0; k < 4; k++) {
-//                        if (opp_t[k] != t[(j + 1) % 4] && opp_t[k] != t[(j + 2) % 4] && opp_t[k] != t[(j + 3) % 4])
-//                            opp_t.opp_t_ids[k] = t_id;
-//                    }
-//                }
-//            }
-//        }
 
-        //match faces: should be integer with sign
-        //match bbox 8 facets: should be -1 and 0~5
-//        match_surface_fs(mesh, input_vertices, input_faces, is_face_inserted);
-        match_bbox_fs(mesh, min, max);
+        
+            const auto skip_tet    = [&mesh](const int i) { return mesh.tets[i].is_removed; };
+            const auto skip_vertex = [&mesh](const int i) { return mesh.tet_vertices[i].is_removed; };
+            MeshIO::extract_surface_mesh(mesh, skip_tet, skip_vertex, surface_verts, surface_faces);
 
-//        MeshIO::write_mesh("delaunay.msh", mesh);
+        // igl::write_triangle_mesh(path, V_sf, F_sf);
+
+        timer.stop();
+        logger().info(" took {}s", timer.getElapsedTime());
     }
+
 }

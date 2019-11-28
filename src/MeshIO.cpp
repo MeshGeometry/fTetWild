@@ -58,6 +58,43 @@ void extract_volume_mesh(const Mesh&                     mesh,
     T.conservativeResize(index, 4);
 }
 
+void extract_volume_mesh2(const Mesh&                     mesh,
+                         const std::function<bool(int)>& skip_tet,
+                         const std::function<bool(int)>& skip_vertex,
+                         MatrixXs&                       V,
+                         Eigen::MatrixXi&                T)
+{
+    const auto& points = mesh.tet_vertices;
+    const auto& tets   = mesh.tets;
+
+    V.resize(points.size(), 3);
+    T.resize(tets.size(), 4);
+
+    size_t           index = 0;
+    std::vector<int> old_2_new(points.size(), -1);
+    for (size_t i = 0; i < points.size(); ++i) {
+        if (skip_vertex(i)) {
+            continue;
+        }
+        old_2_new[i] = index;
+        V.row(index) = points[i].pos.transpose();
+        ++index;
+    }
+
+    V.conservativeResize(index, 3);
+
+    index = 0;
+    for (size_t i = 0; i < tets.size(); ++i) {
+        if (skip_tet(i))
+            continue;
+        for (int j = 0; j < 4; j++) {
+            T(index, j) = old_2_new[tets[i][j]];
+        }
+        ++index;
+    }
+    T.conservativeResize(index, 4);
+}
+
 void extract_surface_mesh(const Mesh&                               mesh,
                           const std::function<bool(int)>&           skip_tet,
                           const std::function<bool(int)>&           skip_vertex,
@@ -72,6 +109,9 @@ void extract_surface_mesh(const Mesh&                               mesh,
     igl::boundary_facets(TT, FS);
     igl::remove_unreferenced(VT, FS, VS, FS, I);
 }
+
+
+
 
 void write_mesh_aux(const std::string&              path,
                     const Mesh&                     mesh,
@@ -199,6 +239,21 @@ void write_mesh_aux(const std::string&              path,
 }
 }  // namespace
 
+void MeshIO::extract_surface_mesh(const Mesh&                               mesh,
+                          const std::function<bool(int)>&           skip_tet,
+                          const std::function<bool(int)>&           skip_vertex,
+                          Eigen::Matrix<Scalar, Eigen::Dynamic, 3>& VS,
+                          Eigen::Matrix<int, Eigen::Dynamic, 3>&    FS)
+{
+    MatrixXs        VT;
+    Eigen::MatrixXi TT;
+    extract_volume_mesh2(mesh, skip_tet, skip_vertex, VT, TT);
+
+    Eigen::VectorXi I;
+    igl::boundary_facets(TT, FS);
+    igl::remove_unreferenced(VT, FS, VS, FS, I);
+}
+
 bool MeshIO::load_mesh(const std::string&     path,
                        std::vector<Vector3>&  points,
                        std::vector<Vector3i>& faces,
@@ -212,6 +267,84 @@ bool MeshIO::load_mesh(const std::string&     path,
     input.clear(false, false);
 
     const bool ok = GEO::mesh_load(path, input);
+
+    if (!ok)
+        return false;
+
+    bool is_valid = (flags.size() == input.facets.nb());
+    if (is_valid) {
+        assert(flags.size() == input.facets.nb());
+        GEO::Attribute<int> bflags(input.facets.attributes(), "bbflags");
+        for (int index = 0; index < (int)input.facets.nb(); ++index) {
+            bflags[index] = flags[index];
+        }
+    }
+
+    if (!input.facets.are_simplices()) {
+        mesh_repair(input,
+                    GEO::MeshRepairMode(GEO::MESH_REPAIR_TRIANGULATE | GEO::MESH_REPAIR_QUIET));
+    }
+
+    // #ifdef FLOAT_TETWILD_USE_FLOAT
+    // 		input.vertices.set_single_precision();
+    // #else
+    // 		input.vertices.set_double_precision();
+    // #endif
+
+    GEO::mesh_reorder(input, GEO::MESH_ORDER_MORTON);
+
+    if (is_valid) {
+        flags.clear();
+        flags.resize(input.facets.nb());
+        GEO::Attribute<int> bflags(input.facets.attributes(), "bbflags");
+        for (int index = 0; index < (int)input.facets.nb(); ++index) {
+            flags[index] = bflags[index];
+        }
+    }
+
+    points.resize(input.vertices.nb());
+    for (size_t i = 0; i < points.size(); i++)
+        points[i] << (input.vertices.point(i))[0], (input.vertices.point(i))[1],
+          (input.vertices.point(i))[2];
+
+    faces.resize(input.facets.nb());
+    for (size_t i = 0; i < faces.size(); i++)
+        faces[i] << input.facets.vertex(i, 0), input.facets.vertex(i, 1), input.facets.vertex(i, 2);
+
+    return ok;
+}
+
+bool MeshIO::load_mesh(const Eigen::MatrixXd&     V,
+                       const Eigen::MatrixXi&     F,
+                       std::vector<Vector3>&  points,
+                       std::vector<Vector3i>& faces,
+                       GEO::Mesh&             input,
+                       std::vector<int>&      flags)
+{
+    igl::Timer timer;
+    timer.start();
+
+    input.clear(false, false);
+
+    // const bool ok = GEO::mesh_load(path, input);
+    bool ok = true;
+
+    input.vertices.clear();
+    input.vertices.create_vertices((int) V.rows());
+    for (int i = 0; i < V.rows(); i++) {
+        GEO::vec3 &p = input.vertices.point(i);
+        for (int j = 0; j < 3; j++)
+            p[j] = V(i, j);
+    }
+    input.facets.clear();
+    input.facets.create_triangles((int) F.rows());
+    for (int i = 0; i < F.rows(); i++) {
+        for (int j = 0; j < 3; j++)
+            input.facets.set_vertex(i, j, F(i, j));
+    }
+    input.facets.compute_borders();
+
+
 
     if (!ok)
         return false;

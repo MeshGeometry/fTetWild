@@ -15,6 +15,6 @@ namespace floatTetWild {
 		// to generate delaunay meshes with the model vertices and bounding box points.
 		static void tetrahedralize(const std::vector<Vector3>& input_vertices, const std::vector<Vector3i>& input_faces, const AABBWrapper &tree,
 								   Mesh &mesh, std::vector<bool> &is_face_inserted);
-
+		static void fTetWildTetrahedralize(floatTetWild::Parameters& params, const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, Eigen::Matrix<Scalar, Eigen::Dynamic, 3>& surface_verts, Eigen::Matrix<int, Eigen::Dynamic, 3>& surface_faces);
 	};
 }
